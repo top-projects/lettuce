@@ -109,10 +109,6 @@ public class ConnectionCommandTest extends AbstractRedisClientTest {
         assertThat(asyncConnection.isOpen()).isTrue();
         assertThat(channelHandler.isClosed()).isFalse();
 
-        CommandHandler<String, String> channelWriter = (CommandHandler<String, String>) channelHandler.getChannelWriter();
-        assertThat(channelWriter.isClosed()).isFalse();
-        assertThat(channelWriter.isSharable()).isTrue();
-
         Connections.close(asyncConnection);
         assertThat(Connections.isOpen(asyncConnection)).isFalse();
         assertThat(Connections.isValid(asyncConnection)).isFalse();
@@ -120,7 +116,6 @@ public class ConnectionCommandTest extends AbstractRedisClientTest {
         assertThat(asyncConnection.isOpen()).isFalse();
         assertThat(channelHandler.isClosed()).isTrue();
 
-        assertThat(channelWriter.isClosed()).isTrue();
     }
 
     @Test

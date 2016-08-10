@@ -7,22 +7,17 @@ import com.lambdaworks.redis.api.StatefulRedisConnection;
 import com.lambdaworks.redis.cluster.models.partitions.Partitions;
 import com.lambdaworks.redis.internal.HostAndPort;
 import com.lambdaworks.redis.internal.LettuceAssert;
-import com.lambdaworks.redis.protocol.CommandArgs;
-import com.lambdaworks.redis.protocol.CommandKeyword;
-import com.lambdaworks.redis.protocol.ProtocolKeyword;
-import com.lambdaworks.redis.protocol.RedisCommand;
+import com.lambdaworks.redis.protocol.*;
 
 /**
  * Channel writer for cluster operation. This writer looks up the right partition by hash/slot for the operation.
  * 
- * @param <K> Key type.
- * @param <V> Value type.
  * @author Mark Paluch
  * @since 3.0
  */
-class ClusterDistributionChannelWriter<K, V> implements RedisChannelWriter<K, V> {
+class ClusterDistributionChannelWriter implements RedisChannelWriter {
 
-    private final RedisChannelWriter<K, V> defaultWriter;
+    private final RedisChannelWriter defaultWriter;
     private final ClusterEventListener clusterEventListener;
     private final int executionLimit;
     private ClusterConnectionProvider clusterConnectionProvider;
@@ -31,7 +26,7 @@ class ClusterDistributionChannelWriter<K, V> implements RedisChannelWriter<K, V>
     long p20, p21, p22, p23, p24, p25, p26;
     long p30, p31, p32, p33, p34, p35, p36, p37;
 
-    public ClusterDistributionChannelWriter(ClientOptions clientOptions, RedisChannelWriter<K, V> defaultWriter,
+    public ClusterDistributionChannelWriter(ClientOptions clientOptions, RedisChannelWriter defaultWriter,
             ClusterEventListener clusterEventListener) {
 
         this.defaultWriter = defaultWriter;
@@ -47,8 +42,7 @@ class ClusterDistributionChannelWriter<K, V> implements RedisChannelWriter<K, V>
     }
 
     @Override
-    @SuppressWarnings("unchecked")
-    public <T, C extends RedisCommand<K, V, T>> C write(C command) {
+    public <K, V, T> RedisCommand<K, V, T> write(RedisCommand<K, V, T> command) {
 
         LettuceAssert.notNull(command, "Command must not be null");
 
@@ -64,7 +58,7 @@ class ClusterDistributionChannelWriter<K, V> implements RedisChannelWriter<K, V>
             commandToSend = new ClusterCommand<>(singleCommand, this, executionLimit);
         }
 
-        RedisChannelWriter<K, V> channelWriter = null;
+        RedisChannelWriter channelWriter = null;
 
         if (commandToSend instanceof ClusterCommand && !commandToSend.isDone()) {
             ClusterCommand<K, V, T> clusterCommand = (ClusterCommand<K, V, T>) commandToSend;
@@ -104,7 +98,7 @@ class ClusterDistributionChannelWriter<K, V> implements RedisChannelWriter<K, V>
         }
 
         if (channelWriter instanceof ClusterDistributionChannelWriter) {
-            ClusterDistributionChannelWriter<K, V> writer = (ClusterDistributionChannelWriter<K, V>) channelWriter;
+            ClusterDistributionChannelWriter writer = (ClusterDistributionChannelWriter) channelWriter;
             channelWriter = writer.defaultWriter;
         }
 
@@ -113,10 +107,10 @@ class ClusterDistributionChannelWriter<K, V> implements RedisChannelWriter<K, V>
         }
 
         if (channelWriter != null && channelWriter != this && channelWriter != defaultWriter) {
-            return channelWriter.write((C) commandToSend);
+            return channelWriter.write(commandToSend);
         }
 
-        defaultWriter.write((C) commandToSend);
+        defaultWriter.write(commandToSend);
 
         return command;
     }
@@ -172,12 +166,11 @@ class ClusterDistributionChannelWriter<K, V> implements RedisChannelWriter<K, V>
             clusterConnectionProvider.close();
             clusterConnectionProvider = null;
         }
-
     }
 
     @Override
-    public void setRedisChannelHandler(RedisChannelHandler<K, V> redisChannelHandler) {
-        defaultWriter.setRedisChannelHandler(redisChannelHandler);
+    public void setConnectionFacade(ConnectionFacade redisChannelHandler) {
+        defaultWriter.setConnectionFacade(redisChannelHandler);
     }
 
     @Override

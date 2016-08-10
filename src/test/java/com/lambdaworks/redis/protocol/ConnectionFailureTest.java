@@ -224,7 +224,6 @@ public class ConnectionFailureTest extends AbstractRedisClientTest {
 
         client.setOptions(ClientOptions.create());
 
-
         RedisURI redisUri = RedisURI.Builder.redis(TestSettings.host(), TestSettings.port())
                 .withTimeout(10, TimeUnit.MINUTES).build();
 

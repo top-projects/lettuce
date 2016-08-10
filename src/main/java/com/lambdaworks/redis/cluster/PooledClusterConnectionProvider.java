@@ -4,7 +4,6 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -48,7 +47,7 @@ class PooledClusterConnectionProvider<K, V> implements ClusterConnectionProvider
     private Object stateLock = new Object();
     private ReadFrom readFrom;
 
-    public PooledClusterConnectionProvider(RedisClusterClient redisClusterClient, RedisChannelWriter<K, V> clusterWriter,
+    public PooledClusterConnectionProvider(RedisClusterClient redisClusterClient, RedisChannelWriter clusterWriter,
             RedisCodec<K, V> redisCodec) {
         this.redisClusterClient = redisClusterClient;
         this.debugEnabled = logger.isDebugEnabled();
@@ -270,12 +269,12 @@ class PooledClusterConnectionProvider<K, V> implements ClusterConnectionProvider
         for (ConnectionKey key : staleConnections) {
             StatefulRedisConnection<K, V> connection = connections.get(key);
 
-            RedisChannelHandler<K, V> redisChannelHandler = (RedisChannelHandler<K, V>) connection;
+            RedisChannelHandler<K, V> endpoint = (RedisChannelHandler<K, V>) connection;
 
-            if (redisChannelHandler.getChannelWriter() instanceof ClusterNodeCommandHandler) {
-                ClusterNodeCommandHandler<?, ?> clusterNodeCommandHandler = (ClusterNodeCommandHandler<?, ?>) redisChannelHandler
+            if (endpoint.getChannelWriter() instanceof ClusterNodeEndpoint) {
+                ClusterNodeEndpoint clusterNodeEndpoint = (ClusterNodeEndpoint) endpoint
                         .getChannelWriter();
-                clusterNodeCommandHandler.prepareClose();
+                clusterNodeEndpoint.prepareClose();
             }
         }
 
@@ -477,10 +476,10 @@ class PooledClusterConnectionProvider<K, V> implements ClusterConnectionProvider
 
         private final RedisClusterClient redisClusterClient;
         private final RedisCodec<K, V> redisCodec;
-        private final RedisChannelWriter<K, V> clusterWriter;
+        private final RedisChannelWriter clusterWriter;
 
         public ConnectionFactory(RedisClusterClient redisClusterClient, RedisCodec<K, V> redisCodec,
-                RedisChannelWriter<K, V> clusterWriter) {
+                RedisChannelWriter clusterWriter) {
             this.redisClusterClient = redisClusterClient;
             this.redisCodec = redisCodec;
             this.clusterWriter = clusterWriter;

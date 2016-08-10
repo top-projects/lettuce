@@ -8,11 +8,9 @@ import java.util.function.Supplier;
 
 import com.lambdaworks.redis.ClientOptions;
 import com.lambdaworks.redis.ConnectionEvents;
-import com.lambdaworks.redis.RedisChannelHandler;
 import com.lambdaworks.redis.internal.LettuceAssert;
-
-import com.lambdaworks.redis.resource.ClientResources;
 import com.lambdaworks.redis.resource.Delay;
+
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.*;
 import io.netty.channel.group.ChannelGroup;
@@ -33,7 +31,7 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 @ChannelHandler.Sharable
 public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements TimerTask {
 
-    public static final long LOGGING_QUIET_TIME_MS = TimeUnit.MILLISECONDS.convert(5, TimeUnit.SECONDS);
+    private static final long LOGGING_QUIET_TIME_MS = TimeUnit.MILLISECONDS.convert(5, TimeUnit.SECONDS);
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(ConnectionWatchdog.class);
 
@@ -42,16 +40,16 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
     private final EventExecutorGroup reconnectWorkers;
     private final ReconnectionHandler reconnectionHandler;
     private final ReconnectionListener reconnectionListener;
-    private boolean listenOnChannelInactive;
-
-    private Channel channel;
     private final Timer timer;
 
+    private Channel channel;
     private SocketAddress remoteAddress;
     private int attempts;
     private long lastReconnectionLogging = -1;
-    private CommandHandler<?, ?> commandHandler;
+    private String logPrefix;
 
+    private volatile boolean armed;
+    private volatile boolean listenOnChannelInactive;
 
     /**
      * Create a new watchdog that adds to new connections to the supplied {@link ChannelGroup} and establishes a new
@@ -64,10 +62,11 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
      * @param reconnectWorkers executor group for reconnect tasks, must not be {@literal null}
      * @param socketAddressSupplier the socket address supplier to obtain an address for reconnection, may be {@literal null}
      * @param reconnectionListener the reconnection listener, must not be {@literal null}
+     * @param connectionFacade the connection facade, must not be {@literal null}
      */
     public ConnectionWatchdog(Delay reconnectDelay, ClientOptions clientOptions, Bootstrap bootstrap, Timer timer,
             EventExecutorGroup reconnectWorkers, Supplier<SocketAddress> socketAddressSupplier,
-            ReconnectionListener reconnectionListener) {
+            ReconnectionListener reconnectionListener, ConnectionFacade connectionFacade) {
 
         LettuceAssert.notNull(reconnectDelay, "Delay must not be null");
         LettuceAssert.notNull(clientOptions, "ClientOptions must not be null");
@@ -75,12 +74,14 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
         LettuceAssert.notNull(timer, "Timer must not be null");
         LettuceAssert.notNull(reconnectWorkers, "ReconnectWorkers must not be null");
         LettuceAssert.notNull(reconnectionListener, "ReconnectionListener must not be null");
+        LettuceAssert.notNull(connectionFacade, "ConnectionFacade must not be null");
 
         this.reconnectDelay = reconnectDelay;
         this.bootstrap = bootstrap;
         this.timer = timer;
         this.reconnectWorkers = reconnectWorkers;
         this.reconnectionListener = reconnectionListener;
+
         Supplier<SocketAddress> wrappedSocketAddressSupplier = new Supplier<SocketAddress>() {
             @Override
             public SocketAddress get() {
@@ -98,28 +99,14 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
             }
         };
 
-        this.reconnectionHandler = new ReconnectionHandler(clientOptions, bootstrap, wrappedSocketAddressSupplier);
-    }
-
-    @Override
-    public void channelRegistered(ChannelHandlerContext ctx) throws Exception {
-
-        if(commandHandler == null) {
-            this.commandHandler = ctx.pipeline().get(CommandHandler.class);
-        }
-        super.channelRegistered(ctx);
+        this.reconnectionHandler = new ReconnectionHandler(clientOptions, bootstrap, wrappedSocketAddressSupplier,
+                connectionFacade);
     }
 
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
 
-        logger.debug("{} userEventTriggered({}, {})", commandHandler.logPrefix(), ctx, evt);
-
-        if (evt instanceof ConnectionEvents.PrepareClose) {
-
-            ConnectionEvents.PrepareClose prepareClose = (ConnectionEvents.PrepareClose) evt;
-            prepareClose(prepareClose);
-        }
+        logger.debug("{} userEventTriggered(ctx, {})", logPrefix(), evt);
 
         if (evt instanceof ConnectionEvents.Activated) {
             attempts = 0;
@@ -128,11 +115,10 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
         super.userEventTriggered(ctx, evt);
     }
 
-    void prepareClose(ConnectionEvents.PrepareClose prepareClose) {
+    void prepareClose() {
 
         setListenOnChannelInactive(false);
         setReconnectSuspended(true);
-        prepareClose.getPrepareCloseFuture().complete(true);
 
         reconnectionHandler.prepareClose();
     }
@@ -141,8 +127,9 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
 
         channel = ctx.channel();
-        logger.debug("{} channelActive({})", commandHandler.logPrefix(), ctx);
         remoteAddress = channel.remoteAddress();
+        logPrefix = null;
+        logger.debug("{} channelActive()", logPrefix());
 
         super.channelActive(ctx);
     }
@@ -150,23 +137,29 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
 
-        logger.debug("{} channelInactive({})", commandHandler.logPrefix(), ctx);
+        logger.debug("{} channelInactive()", logPrefix());
+        if (!armed) {
+            logger.debug("{} ConnectionWatchdog not armed", logPrefix());
+            return;
+        }
+
         channel = null;
 
-
         if (listenOnChannelInactive && !reconnectionHandler.isReconnectSuspended()) {
-            RedisChannelHandler<?, ?> channelHandler = ctx.pipeline().get(RedisChannelHandler.class);
-            if (channelHandler != null) {
-                reconnectionHandler.setTimeout(channelHandler.getTimeout());
-                reconnectionHandler.setTimeoutUnit(channelHandler.getTimeoutUnit());
-            }
-
             scheduleReconnect();
         } else {
-            logger.debug("{} Reconnect scheduling disabled", commandHandler.logPrefix(), ctx);
+            logger.debug("{} Reconnect scheduling disabled", logPrefix(), ctx);
         }
 
         super.channelInactive(ctx);
+    }
+
+    /**
+     * Enable {@link ConnectionWatchdog} to listen for disconnected events.
+     */
+    void arm() {
+        this.armed = true;
+        setListenOnChannelInactive(true);
     }
 
     /**
@@ -174,15 +167,15 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
      */
     public void scheduleReconnect() {
 
-        logger.debug("{} scheduleReconnect()", commandHandler.logPrefix());
+        logger.debug("{} scheduleReconnect()", logPrefix());
 
         if (!isEventLoopGroupActive()) {
             logger.debug("isEventLoopGroupActive() == false");
             return;
         }
 
-        if (commandHandler.isClosed()) {
-            logger.debug("Skip reconnect scheduling, CommandHandler is closed");
+        if (!isListenOnChannelInactive()) {
+            logger.debug("Skip reconnect scheduling, listener disabled");
             return;
         }
 
@@ -190,7 +183,7 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
             attempts++;
 
             int timeout = (int) reconnectDelay.getTimeUnit().toMillis(reconnectDelay.createDelay(attempts));
-            logger.debug("{} Reconnect attempt {}, delay {}ms", commandHandler.logPrefix(), attempts, timeout);
+            logger.debug("{} Reconnect attempt {}, delay {}ms", logPrefix(), attempts, timeout);
             timer.newTimeout(new TimerTask() {
                 @Override
                 public void run(final Timeout timeout) throws Exception {
@@ -207,7 +200,7 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
                 }
             }, timeout, TimeUnit.MILLISECONDS);
         } else {
-            logger.debug("{} Skipping scheduleReconnect() because I have an active channel", commandHandler.logPrefix());
+            logger.debug("{} Skipping scheduleReconnect() because I have an active channel", logPrefix());
         }
     }
 
@@ -227,8 +220,8 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
             return;
         }
 
-        if (commandHandler.isClosed()) {
-            logger.debug("Skip reconnect scheduling, CommandHandler is closed");
+        if (!isListenOnChannelInactive()) {
+            logger.debug("Skip reconnect scheduling, listener disabled");
             return;
         }
 
@@ -274,25 +267,20 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
     }
 
     private boolean isEventLoopGroupActive(EventExecutorGroup executorService) {
-
-        if (executorService.isShutdown() || executorService.isTerminated() || executorService.isShuttingDown()) {
-            return false;
-        }
-
-        return true;
+        return !(executorService.isShutdown() || executorService.isTerminated() || executorService.isShuttingDown());
     }
 
     private boolean shouldLog() {
 
         long quietUntil = lastReconnectionLogging + LOGGING_QUIET_TIME_MS;
-
-        if (quietUntil > System.currentTimeMillis()) {
-            return false;
-        }
-
-        return true;
+        return quietUntil <= System.currentTimeMillis();
     }
 
+    /**
+     * Enable event listener for disconnected events.
+     * 
+     * @param listenOnChannelInactive {@literal true} to listen for disconnected events.
+     */
     public void setListenOnChannelInactive(boolean listenOnChannelInactive) {
         this.listenOnChannelInactive = listenOnChannelInactive;
     }
@@ -301,15 +289,33 @@ public class ConnectionWatchdog extends ChannelInboundHandlerAdapter implements 
         return listenOnChannelInactive;
     }
 
-    public boolean isReconnectSuspended() {
-        return reconnectionHandler.isReconnectSuspended();
+    /**
+     * Suspend reconnection temporarily. Reconnect suspension will interrupt reconnection attempts.
+     * 
+     * @param reconnectSuspended {@literal true} to suspend reconnection
+     */
+    public void setReconnectSuspended(boolean reconnectSuspended) {
+        reconnectionHandler.setReconnectSuspended(reconnectSuspended);
     }
 
-    public void setReconnectSuspended(boolean reconnectSuspended) {
-        reconnectionHandler.setReconnectSuspended(true);
+    public boolean isReconnectSuspended() {
+        return reconnectionHandler.isReconnectSuspended();
     }
 
     ReconnectionHandler getReconnectionHandler() {
         return reconnectionHandler;
     }
+
+    private String logPrefix() {
+
+        if (logPrefix != null) {
+            return logPrefix;
+        }
+
+        StringBuilder buffer = new StringBuilder(64);
+        buffer.append('[').append("Last known addr=").append(remoteAddress).append(", ")
+                .append(ChannelLogDescriptor.logDescriptor(channel)).append(']');
+        return logPrefix = buffer.toString();
+    }
+
 }
